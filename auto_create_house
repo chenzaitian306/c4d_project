@@ -1,0 +1,1062 @@
+import c4d
+import math
+from c4d import utils
+import os
+
+
+
+#autoplan类
+class autoplan():
+    MESHDATA='meshData'
+
+    #初始化
+    def __init__(self,doc,tagObject):
+        self.tagObject=tagObject
+        self.doc=doc
+
+    #autoplan对象的子集物体对象列表
+    def childrens(self):
+        return c4d.GeListNode.GetChildren(self.tagObject)
+
+    #autoplan对象的子集图层对象列表 mode=['wall','window','door','config']
+    def layers(self,mode=None):
+        modelist=['all','wall','window','door','config']
+        layerslst=doc.GetLayerObjectRoot().GetChildren()
+        if mode is None:
+            return layerslst
+        alllist=[layer[c4d.ID_BASELIST_NAME] for layer in layerslst[1:]]
+        walllist=[layer  for layer in alllist if 'wall' in layer]
+        windowlist=[layer  for layer in alllist if 'window' in layer]
+        doorlist=[layer  for layer in alllist if 'door' in layer]
+        configlist=[layer  for layer in alllist for el in ['wall','window','door'] if el not in layer]
+        return dict(zip(modelist,[alllist,walllist,windowlist,doorlist,configlist]))[mode]
+
+
+    #autoplan对象的特定index位置的子物体信息
+    def getinfo(self,index=0):
+        return self.layers()[index].GetBranchInfo(flags=c4d.GETBRANCHINFO_NONE)
+
+    #autoplan对象按图层获得物体列表
+    def getlayers(self,name=None):
+        dic={}
+        for layer in self.layers(mode='all'):
+            dic[layer]=[]
+            for obj in self.childrens():
+                if obj.GetLayerObject(doc)[c4d.ID_BASELIST_NAME]==layer:
+                    dic[layer].append(obj)
+                continue
+        if name is None:
+            return  dic
+        return dic[name]
+
+    #删除物体标签
+    def cleanTag(self):
+        for lst in list(self.getlayers().values()):
+            for obj in lst:
+                obj.KillTag(c4d.Ttexture)
+
+
+
+    #autoplan对象按图层获得物体的矩阵列表
+    def getlayerMatrix(self,layername):
+        lst=[]
+        for layer,objs in self.getlayers().items():
+            if layer==layername:
+                for obj in objs:
+                    if len(c4d.GeListNode.GetChildren(obj))==0:
+                        matrix=self.getAxis(obj,mode='all')
+                        lst.append(matrix)
+        return lst
+
+    #autoplan对象生成json信息,生成格式{layername:[[pos,rota,scale],]}
+    def getjson(self):
+        dic={}
+        layernames=list(self.getlayers().keys())
+        for layername in layernames:
+            matrixlst=self.getlayerMatrix(layername)
+            dic[layername]=matrixlst
+        return dic
+
+    #转换轴向信息
+    def getAxis(self,obj,mode='all'):
+
+        posx=obj[c4d.ID_BASEOBJECT_REL_POSITION,c4d.VECTOR_X]
+        posy=obj[c4d.ID_BASEOBJECT_REL_POSITION,c4d.VECTOR_Y]
+        posz=obj[c4d.ID_BASEOBJECT_REL_POSITION,c4d.VECTOR_Z]
+        pos=c4d.Vector(posx,-posz,posy)
+
+        roax=obj[c4d.ID_BASEOBJECT_REL_ROTATION,c4d.VECTOR_X]
+        roay=obj[c4d.ID_BASEOBJECT_REL_ROTATION,c4d.VECTOR_Y]
+        roaz=obj[c4d.ID_BASEOBJECT_REL_ROTATION,c4d.VECTOR_Z]
+        roa=c4d.Vector(roax,-roaz,roay)
+
+        sclx=obj[c4d.ID_BASEOBJECT_REL_SCALE,c4d.VECTOR_X]
+        scly=obj[c4d.ID_BASEOBJECT_REL_SCALE,c4d.VECTOR_Y]
+        sclz=obj[c4d.ID_BASEOBJECT_REL_SCALE,c4d.VECTOR_Z]
+        scl=c4d.Vector(sclx,sclz,scly)
+
+        if mode=='position':
+            return pos
+        if mode=='rotation':
+            return roa
+        if mode=='scale':
+            return scl
+        if mode=='all':
+            return dict(zip(['position','rotation','scale'],[pos,roa,scl]))
+
+
+    #autoplan按图层名称配置,meshData是装载替换模型的父级，layername是要匹配的图层名称
+    def setConfig(self,meshData,layername):
+        lst=[]
+        meshes=meshData.GetChildren()
+        if meshes is None:
+            return None
+        for mesh in meshes:
+            if mesh[c4d.ID_BASELIST_NAME] == layername:
+                matrixs=self.getjson()[layername]
+                for matrix in matrixs:
+                    newobj = mesh.GetClone()
+                    newobj[c4d.ID_BASEOBJECT_ROTATION_ORDER]=5
+                    newobj[c4d.ID_BASEOBJECT_REL_POSITION]=matrix['position']
+                    newobj[c4d.ID_BASEOBJECT_REL_ROTATION]=matrix['rotation']
+                    newobj[c4d.ID_BASEOBJECT_REL_SCALE]=matrix['scale']
+                    lst.append(newobj)
+                    doc.InsertObject(newobj)
+                    c4d.EventAdd()
+        return lst
+
+    #autoplan按图层全局配置,meshData是装载替换模型的父级
+    def setAllConfig(self,meshData):
+        meshes=meshData.GetChildren()
+        if len(meshes)==0:
+            return False
+        for mesh in meshes:
+            layername=mesh[c4d.ID_BASELIST_NAME]
+            if layername in self.getjson().keys():
+                self.setConfig(meshData,layername)
+        return True
+
+
+
+#InfoMage类
+class InfoMage():
+    def __init__(self,name,doc,icon=1052837):
+        self.name=name
+        self.doc=doc
+        self.icon=icon
+
+    #创建meshData，用于存储要处理的模型。将要自动使用的模型放到它的子集里。名字与图层名字一致
+    def createMeshData(self):
+        if self.doc.SearchObject('meshData') is None:
+            obj=c4d.BaseObject(5140)
+            obj[c4d.ID_BASELIST_NAME]='meshData'
+            obj[c4d.ID_BASELIST_ICON_FILE]=self.icon
+            obj[c4d.ID_BASELIST_ICON_COLORIZE_MODE]=1
+            obj[c4d.ID_BASELIST_ICON_COLOR]=c4d.Vector(1, 0.9, 0.4)
+
+            doc.InsertObject(obj)
+            c4d.EventAdd()
+            return obj
+
+
+    #创建管理器infoMage,用处存储识别到的信息
+    def insertInfoMage(self):
+        if self.doc.SearchObject(self.name) is None:
+            obj=c4d.BaseObject(5140)
+            obj[c4d.ID_BASELIST_NAME]=self.name
+            obj[c4d.ID_BASELIST_ICON_FILE]=self.icon
+            obj[c4d.ID_BASELIST_ICON_COLORIZE_MODE]=1
+            obj[c4d.ID_BASELIST_ICON_COLOR]=c4d.Vector(1, 0.027, 0.4)
+
+            textTag=c4d.BaseTag(465001537)
+            textTag[c4d.ID_BASELIST_NAME]='版本说明'
+            textTag[c4d.TODOTAG_TEXT]=''
+            obj.InsertTag(textTag)
+            doc.InsertObject(obj)
+            c4d.EventAdd()
+            return obj
+        c4d.EventAdd()
+        return None
+
+    #创建用户数据组GUI
+    def addUserDataGroup(self,obj,name,parentGroup=None, columns=None, shortname=None):
+        if obj is None: return False
+        if shortname is None: shortname =name
+        bc =c4d.GetCustomDatatypeDefault(c4d.DTYPE_GROUP)
+        bc[c4d.DESC_NAME] = name
+        bc[c4d.DESC_SHORT_NAME] = shortname
+        bc[c4d.DESC_TITLEBAR] = 1
+        if parentGroup is not None:
+            bc[c4d.DESC_PARENTGROUP] = parentGroup
+        if columns is not None:
+            #DESC_COLUMNS VALUE IS WRONG IN 15.057 - SHOULD BE 22
+            bc[22] =columns
+        return obj.AddUserData(bc)
+
+
+    #创建链接用户数据GUI
+    def addUserDataLink(self,obj,name,parentGroup=None):
+        if obj is None: return False
+        bc =c4d.GetCustomDatatypeDefault(c4d.DTYPE_BASELISTLINK)
+        bc[c4d.DESC_NAME] =name
+        bc[c4d.DESC_SHORT_NAME]=name
+        #bc[c4d.DESC_CUSTOMGUI]=c4d.CUSTOMGUI_INEXCLUDE_LIST
+        #bc[c4d.IN_EXCLUDE_FLAG_NUM_FLAGS] =0
+        bc[c4d.DESC_ANIMATE]=c4d.DESC_ANIMATE_OFF
+        if parentGroup is not None:
+            bc[c4d.DESC_PARENTGROUP] = parentGroup
+        element =obj.AddUserData(bc)
+        return element
+
+    #创建包含排除用户数据GUI
+    def addUserDataInEx(self,obj,name,parentGroup=None):
+        if obj is None: return False
+        bc =c4d.GetCustomDatatypeDefault(c4d.CUSTOMDATATYPE_INEXCLUDE_LIST)
+        bc[c4d.DESC_NAME] =name
+        bc[c4d.DESC_SHORT_NAME] =name
+        bc[c4d.DESC_CUSTOMGUI] =c4d.CUSTOMGUI_INEXCLUDE_LIST
+        bc[c4d.IN_EXCLUDE_FLAG_NUM_FLAGS] =1
+        bc[c4d.IN_EXCLUDE_FLAG_IMAGE_01_ON] =1009313
+        bc[c4d.IN_EXCLUDE_FLAG_IMAGE_01_OFF] =1009317
+        bc[c4d.DESC_ANIMATE]=c4d.DESC_ANIMATE_OFF
+        if parentGroup is not None:
+            bc[c4d.DESC_PARENTGROUP] = parentGroup
+        element =obj.AddUserData(bc)
+        return element
+
+    #构建autoplanned控制界面GUI
+    def CreateGUI(self,dic,obj,mode=None):
+        #关键字列表
+        lst=['wall','window','door']
+        grouplst=['匹配列表','结构列表']
+        linklst=[]
+
+        tablegroup=self.addUserDataGroup(obj,grouplst[0],c4d.DescID(0))
+        hardgroup=self.addUserDataGroup(obj,grouplst[1],c4d.DescID(0))
+
+        subwall=self.addUserDataGroup(obj,lst[0],hardgroup)
+        subwindow=self.addUserDataGroup(obj,lst[1],hardgroup)
+        subdoor=self.addUserDataGroup(obj,lst[2],hardgroup)
+
+        tablelst=[]
+        for key in list(dic.keys()):
+            cout=0
+            for name in lst:
+                #关键字分流
+                if name in key and name=='wall':
+                    sublink=self.addUserDataInEx(obj,key,subwall)
+                    if len(dic[key])!=0:
+                        info=self.fillInexclude(dic[key])
+                        obj[sublink]=info
+                    cout+=1
+                    break
+                if name in key and name=='window':
+                    sublink=self.addUserDataInEx(obj,key,subwindow)
+                    if len(dic[key])!=0:
+                        info=self.fillInexclude(dic[key])
+                        obj[sublink]=info
+                    cout+=1
+                    break
+                if name in key and name=='door':
+                    sublink=self.addUserDataInEx(obj,key,subdoor)
+                    if len(dic[key])!=0:
+                        info=self.fillInexclude(dic[key])
+                        obj[sublink]=info
+                    cout+=1
+                    break
+            if cout==0:
+                link=self.addUserDataInEx(obj,key,tablegroup)
+                if len(dic[key])!=0:
+                    info=self.fillInexclude(dic[key])
+                    obj[link]=info
+                tablelst.append(key)
+                linklst.append(link)
+        #返回切换
+        if mode is True:
+            return dict(zip(grouplst,[tablegroup,hardgroup]))
+        if mode is False:
+            return dict(zip(lst,[subwall,subwindow,subdoor]))
+        if mode is None:
+            return dict(zip(tablelst,linklst))
+
+    #处理inexclude赋值函数
+    def fillInexclude(self,lst):
+        info=c4d.InExcludeData()
+        for obj in lst:
+            info.InsertObject(obj,1)
+        return info
+
+
+#硬装对象类型
+class buildings():
+    WELDINGRADIUS=1
+    SEARCHPOLYGON=10000
+    WALLDEEP=20
+    SCALENUM=c4d.Vector(1.005,1.005,1.005)
+    STORYHEIGHT=280
+    QIANTAI=300
+    QIANTAIHEIGHT=135
+    WALLFOOT=10
+    AREALIMIT=10000
+
+    DOORHEIGHT=240
+    DOORNAME='doorcut'
+
+    WINDOWNAME='windowcut'
+    WINDOWMERGE='windowmerge'
+    WINDOWDOWN=90
+    WINDOWUP=240
+
+    WALLNAME='BaseWalls'
+    WALLSPLINENAME='WallSplines'
+
+    FLOORNAME='BaseFloor'
+    FLOORTHICKNESS=0.1
+    ALLFLOORS='AllFloors'
+
+    COMPLETEWALLS='completewalls'
+    CUTCONNECT='autocuts'
+
+    ALLCEILING='AllCeilings'
+    CEILINGNAME='BaseCeiling'
+    CEILINGTHICKNESS=0.1
+    #默认信息库
+    DEFAULT_DOORSIZE={'glassdoor':[80,240],'doubleglassdoor':[150,240]}
+    DEFAULT_WALLSIZE={'glasswall':[150,240]}
+    DEFAULT_WINDOWSIZE={'window':[150,240]}
+    DEFAULT_FURNITURE={'qiantai':[300,135],'LOGOBORAD':[300,280],'whiteboard':[300,220]}
+
+    #构建函数，layersdic是{图层名：[物体列表]}
+    def __init__(self,doc,layersdic):
+        self.doc=doc
+        #self.splines=splines
+        self.layersdic=layersdic
+
+
+    #构建基本墙体轮廓
+    def createWall(self,up=None):
+        connect_wall=c4d.BaseObject(1011010)
+        connect_wall[c4d.CONNECTOBJECT_WELD]=0
+        connect_wall[c4d.CONNECTOBJECT_PHONG_MODE]=3
+        if up is None:
+            self.doc.InsertObject(connect_wall)
+        else:
+            self.doc.InsertObject(connect_wall,up)
+
+        #踢脚线
+        extruding_foot=c4d.BaseObject(5116)
+        extruding_foot[c4d.EXTRUDEOBJECT_EXTRUSIONOFFSET]=self.WALLFOOT
+        extruding_foot[c4d.ID_BASELIST_NAME]=self.WALLNAME
+        extruding_foot[c4d.ID_BASEOBJECT_ROTATION_ORDER]=5
+        extruding_foot[c4d.ID_BASEOBJECT_REL_ROTATION,c4d.VECTOR_X]=c4d.utils.DegToRad(-90)
+        extruding_foot[c4d.ID_BASEOBJECT_REL_POSITION,c4d.VECTOR_Y]=0
+        extruding_foot[c4d.CAPSANDBEVELS_CAP_ENABLE_START]=1
+        extruding_foot[c4d.CAPSANDBEVELS_CAP_ENABLE_END]=0
+        doc.InsertObject(extruding_foot,parent=connect_wall)
+        #踢脚线上材质
+        wallfootmtl=self.doc.SearchMaterial('黑色氟碳漆')
+        self.setMaterial(extruding_foot,wallfootmtl,pro=3,tile=1,seaml=1,log='')
+
+        #墙体
+        extruding_up=c4d.BaseObject(5116)
+        extruding_up[c4d.EXTRUDEOBJECT_EXTRUSIONOFFSET]=self.STORYHEIGHT - self.WALLFOOT
+        extruding_up[c4d.ID_BASELIST_NAME]=self.WALLNAME
+        extruding_up[c4d.ID_BASEOBJECT_ROTATION_ORDER]=5
+        extruding_up[c4d.ID_BASEOBJECT_REL_ROTATION,c4d.VECTOR_X]=c4d.utils.DegToRad(-90)
+        extruding_up[c4d.ID_BASEOBJECT_REL_POSITION,c4d.VECTOR_Y]=self.WALLFOOT
+        extruding_up[c4d.CAPSANDBEVELS_CAP_ENABLE_START]=0
+        extruding_up[c4d.CAPSANDBEVELS_CAP_ENABLE_END]=1
+        doc.InsertObject(extruding_up,parent=connect_wall)
+        #墙面上材质
+        mtl=self.doc.SearchMaterial('墙面木纹')
+        self.setMaterial(extruding_up,mtl,pro=3,tile=1,seaml=1,log='')
+
+        #墙体轮廓线条
+        connect_up=c4d.BaseObject(1011010)
+        connect_up[c4d.CONNECTOBJECT_WELD]=0
+        connect_up[c4d.CONNECTOBJECT_PHONG_MODE]=3
+        connect_up[c4d.ID_BASELIST_NAME]=self.WALLSPLINENAME
+        doc.InsertObject(connect_up,parent=extruding_up)
+
+
+        #踢脚线轮廓线条
+        connect_foot=c4d.BaseObject(1011010)
+        connect_foot[c4d.CONNECTOBJECT_WELD]=0
+        connect_foot[c4d.CONNECTOBJECT_PHONG_MODE]=3
+        connect_foot[c4d.ID_BASELIST_NAME]=self.WALLSPLINENAME
+        doc.InsertObject(connect_foot,parent=extruding_foot)
+
+
+        for spline in self.layersdic['wall']:
+            newsp_foot=spline.GetClone()
+            newsp_foot=self.changeSpline(newsp_foot)
+            newsp_foot[c4d.ID_LAYER_LINK]=doc.GetLayerObjectRoot().GetDown()
+            self.doc.InsertObject(newsp_foot,parent=connect_foot)
+
+        for spline in self.layersdic['wall']:
+            newsp_up=spline.GetClone()
+            newsp_up=self.changeSpline(newsp_up)
+            newsp_up[c4d.ID_LAYER_LINK]=doc.GetLayerObjectRoot().GetDown()
+            self.doc.InsertObject(newsp_up,parent=connect_up)
+        c4d.EventAdd()
+        return connect_wall
+
+
+    #获得物体的体积尺寸与窗户/门的矩阵信息mode可以是'window'，'door','wall'
+    def getXYZ(self,layerobj,mode='window'):
+        matrix=layerobj.GetMg()
+        xyz=c4d.utils.GetBBox(layerobj,matrix)
+        if mode=='window':
+            y=self.WINDOWUP-0.5*self.WINDOWDOWN
+            new_pos=c4d.Vector(matrix.off.x,y,abs(matrix.off.z))
+            new_size=c4d.Vector(xyz[1].x*2,xyz[1].y*2,y)
+        if mode in ['door','wall']:
+            y=0.5*self.DOORHEIGHT
+            new_pos=c4d.Vector(matrix.off.x,y,matrix.off.z)
+            new_size=c4d.Vector(xyz[1].x*2,xyz[1].y*2,y)
+        return new_pos,new_size
+
+
+    #创建hardData，用于存储要处理的模型。将要自动使用的模型放到它的子集里。名字与图层名字一致
+    def createHardData(self):
+        if self.doc.SearchObject('hardData') is None:
+            obj=c4d.BaseObject(5140)
+            obj[c4d.ID_BASELIST_NAME]='hardData'
+            #obj[c4d.ID_BASELIST_ICON_FILE]=self.icon
+            obj[c4d.ID_BASELIST_ICON_COLORIZE_MODE]=1
+            obj[c4d.ID_BASELIST_ICON_COLOR]=c4d.Vector(1, 0.9, 0.4)
+            doc.InsertObject(obj)
+            c4d.EventAdd()
+            return obj
+
+    #识别门窗预留孔洞:layers是{图层名：[物体列表]}
+    def subtractAll(self,obj=None):
+        connect=c4d.BaseObject(1011010)
+        connect[c4d.ID_BASELIST_NAME]=self.CUTCONNECT
+        connect[c4d.CONNECTOBJECT_WELD]=0
+        connect[c4d.CONNECTOBJECT_PHONG_MODE]=3
+
+        connect_otherwall=c4d.BaseObject(1011010)
+        connect_otherwall[c4d.ID_BASELIST_NAME]=self.CUTCONNECT
+        connect_otherwall[c4d.CONNECTOBJECT_WELD]=0
+        connect_otherwall[c4d.CONNECTOBJECT_PHONG_MODE]=3
+
+        Boolobj=c4d.BaseObject(1010865)
+        Boolobj[c4d.ID_BASELIST_NAME]=self.COMPLETEWALLS
+        #Boolobj[c4d.BOOLEOBJECT_SINGLE_OBJECT]=1
+        #Boolobj[c4d.BOOLEOBJECT_OPTIMIZE_LEVEL]=1
+
+        Boolobjparent=c4d.BaseObject(1010865)
+        Boolobjparent[c4d.ID_BASELIST_NAME]=self.COMPLETEWALLS
+        #Boolobjparent[c4d.BOOLEOBJECT_SINGLE_OBJECT]=1
+        #Boolobjparent[c4d.BOOLEOBJECT_OPTIMIZE_LEVEL]=1
+
+        self.doc.InsertObject(Boolobjparent)
+        self.doc.InsertObject(Boolobj,parent=Boolobjparent)
+        self.doc.InsertObject(connect_otherwall,parent=Boolobjparent,pred=Boolobj)
+
+        basewall=self.createWall(Boolobj)
+        self.doc.InsertObject(connect,parent=Boolobj,pred=basewall)
+        #用于存放window对象的样条线和挤出对象
+        backlog_cuts=[]
+        backlog_splines=[]
+        #用于存放otherwall对象的样条线和挤出对象
+        backlog_otherwall_cuts=[]
+        backlog_otherwall_splines=[]
+        for layername,splines in self.layersdic.items():
+            if 'wall' in layername and layername!='wall':
+                for spline in splines:
+                    newsp=spline.GetClone()
+
+                    newsp[c4d.ID_BASEOBJECT_REL_SCALE]=self.SCALENUM
+                    newsp[c4d.ID_LAYER_LINK]=doc.GetLayerObjectRoot().GetDown()
+                    cut=self.subtractDoor()
+                    self.doc.InsertObject(cut,parent=connect_otherwall)
+                    backlog_otherwall_cuts.append(cut)
+                    backlog_otherwall_splines.append(newsp)
+            if 'window' in layername:
+                for spline in splines:
+                    newsp=spline.GetClone()
+
+                    newsp[c4d.ID_BASEOBJECT_REL_SCALE]=self.SCALENUM
+                    newsp[c4d.ID_LAYER_LINK]=doc.GetLayerObjectRoot().GetDown()
+                    cut=self.subtractWindow()
+                    self.doc.InsertObject(cut,parent=connect)
+                    backlog_cuts.append(cut)
+                    backlog_splines.append(newsp)
+            if 'door' in layername:
+                for spline in splines:
+                    newsp=spline.GetClone()
+                    newsp[c4d.ID_BASEOBJECT_REL_SCALE]=self.SCALENUM
+                    newsp[c4d.ID_LAYER_LINK]=doc.GetLayerObjectRoot().GetDown()
+                    cut=self.subtractDoor()
+                    self.doc.InsertObject(cut,parent=connect)
+                    backlog_otherwall_cuts.append(cut)
+                    backlog_otherwall_splines.append(newsp)
+
+        #插入被剪掉的window样条线
+        for index,spline in enumerate(backlog_splines):
+            spline=self.changeSpline(spline)
+            self.doc.InsertObject(spline,parent=backlog_cuts[index])
+
+        #插入被剪掉的door和otherwall
+        for index,spline in enumerate(backlog_otherwall_splines):
+            spline=self.changeSpline(spline)
+            self.doc.InsertObject(spline,parent=backlog_otherwall_cuts[index])
+        """
+        Boolobjparent=self.cpolygon(Boolobjparent)
+        Boolobjparent=self.weldObject(Boolobjparent)
+
+        #logo墙上材质
+        logo=self.doc.SearchObject('LOGO')
+        logowallmtl=self.doc.SearchMaterial('绿色烤漆')
+        self.GeRayCollider(Boolobjparent,logo,5,name='logowall')
+        self.setMaterial(Boolobjparent,logowallmtl,pro=3,tile=1,seaml=1,log='logowall')
+        """
+        c4d.EventAdd()
+        return Boolobjparent
+
+
+    #spline对象的修正(点顺序反转)
+    def changeSpline(self,spline):
+        if spline.GetPointCount()>=3 and spline.IsClosed:
+            v1=spline.GetPoint(0)-spline.GetPoint(1)
+            v2=spline.GetPoint(1)-spline.GetPoint(2)
+            v3=v1.Cross(v2)
+            nor=c4d.Vector(0,0,1)
+            sita=v3.GetAngle(nor)
+            if sita==0 and math.atan(sita)==0:
+                settings = c4d.BaseContainer()
+                res = utils.SendModelingCommand(command=c4d.MCOMMAND_SPLINE_REVERSE,
+                                        list=[spline],
+                                        mode=c4d.MODELINGCOMMANDMODE_ALL,
+                                        bc=settings,
+                                        doc=self.doc)
+    
+            return spline
+        else:
+            return spline
+
+    #判断spline对象的轴向，返回长度和夹角
+    def getSplineAngle(self,spline,mode=True):
+        if spline.IsClosed():
+            v1=spline.GetPoint(1)-spline.GetPoint(0)
+            v2=spline.GetPoint(2)-spline.GetPoint(1)
+            l1=v1.GetLength()
+            l2=v2.GetLength()
+            v3=c4d.Vector(1,0,0)
+            if l2>=l1:
+                if mode:
+                    return l2,c4d.Vector(-v3.GetAngle(v2),0,0)
+                else:
+                    return c4d.Vector(-v3.GetAngle(v1),0,0)
+            else:
+                if mode:
+                    return l1,c4d.Vector(-v3.GetAngle(v1),0,0)
+                else:
+                    return c4d.Vector(-v3.GetAngle(v2),0,0)
+
+
+    #获得C掉的模型
+    def cpolygon(self,obj):
+        name=obj[c4d.ID_BASELIST_NAME]
+        doc.SetSelection(obj,mode=c4d.SELECTION_NEW)
+        c4d.CallCommand(16768)
+        newobj=doc.SearchObject(name)
+        return newobj
+
+
+    #挖窗户
+    def subtractWindow(self):
+        extruding=c4d.BaseObject(5116)
+        extruding[c4d.EXTRUDEOBJECT_EXTRUSIONOFFSET]=self.WINDOWUP-self.WINDOWDOWN
+        extruding[c4d.ID_BASELIST_NAME]=self.WINDOWNAME
+        extruding[c4d.ID_BASEOBJECT_ROTATION_ORDER]=5
+        extruding[c4d.ID_BASEOBJECT_REL_POSITION,c4d.VECTOR_Y]=self.WINDOWDOWN
+        extruding[c4d.ID_BASEOBJECT_REL_ROTATION,c4d.VECTOR_X]=c4d.utils.DegToRad(-90)
+        return extruding
+
+    #挖门洞
+    def subtractDoor(self):
+        extruding=c4d.BaseObject(5116)
+        extruding[c4d.EXTRUDEOBJECT_EXTRUSIONOFFSET]=self.DOORHEIGHT
+        extruding[c4d.ID_BASELIST_NAME]=self.DOORNAME
+        extruding[c4d.ID_BASEOBJECT_ROTATION_ORDER]=5
+        extruding[c4d.ID_BASEOBJECT_REL_ROTATION,c4d.VECTOR_X]=c4d.utils.DegToRad(-90)
+        return extruding
+
+    #获得complete墙体的墙面和轮廓线返回BaseSelect()
+    def tagInfo(self,obj):
+        tags=obj.GetTags()
+        for tag in tags:
+            if tag[c4d.ID_BASELIST_NAME]=='S':
+                wallspaces=tag.GetBaseSelect()
+            if tag[c4d.ID_BASELIST_NAME]=='ES1':
+                wallsplines=tag.GetBaseSelect()
+        return  wallspaces.GetAll(wallspaces.GetCount()-1),wallsplines.GetAll(wallsplines.GetCount()-1)
+
+
+    #优化模型点焊接
+    def weldObject(self,obj):
+        settings = c4d.BaseContainer()
+        settings[c4d.MDATA_OPTIMIZE_POINTS] = self.WELDINGRADIUS
+        res = utils.SendModelingCommand(command=c4d.MCOMMAND_OPTIMIZE,
+                                        list=[obj],
+                                        mode=c4d.MODELINGCOMMANDMODE_ALL,
+                                        bc=settings,
+                                        doc=doc)
+        c4d.EventAdd()
+        return obj
+
+
+    #识别墙体，生成地板/天花板,return 地板对象列表,mode=['floor','ceiling']
+    def createBoard(self,mode='floor'):
+        splines=self.layersdic['wall']
+        connect=c4d.BaseObject(1011010)
+        if mode=='floor':
+            name=self.ALLFLOORS
+            subname=self.FLOORNAME
+            thick=self.FLOORTHICKNESS
+        if mode=='ceiling':
+            name=self.ALLCEILING
+            subname=self.CEILINGNAME
+            thick=self.CEILINGTHICKNESS
+        connect[c4d.ID_BASELIST_NAME]=name
+        connect[c4d.CONNECTOBJECT_WELD]=0
+        connect[c4d.CONNECTOBJECT_PHONG_MODE]=3
+        self.doc.InsertObject(connect)
+        splist=[]
+        for spline in splines:
+            spline=self.changeSpline(spline)
+            extruding=c4d.BaseObject(5116)
+            extruding[c4d.EXTRUDEOBJECT_EXTRUSIONOFFSET]=self.FLOORTHICKNESS
+            extruding[c4d.ID_BASELIST_NAME]=self.FLOORNAME
+            extruding[c4d.ID_BASEOBJECT_ROTATION_ORDER]=5
+            extruding[c4d.ID_BASEOBJECT_REL_ROTATION,c4d.VECTOR_X]=c4d.utils.DegToRad(-90)
+            self.doc.InsertObject(extruding,parent=connect)
+            newsp=spline.GetClone()
+            newsp[c4d.ID_BASEOBJECT_REL_SCALE]=self.SCALENUM
+            newsp[c4d.ID_LAYER_LINK]=doc.GetLayerObjectRoot().GetDown()
+            self.doc.InsertObject(newsp,parent=extruding)
+            splist.append(extruding)
+        if mode=='floor':
+            mtl=self.doc.SearchMaterial('地板')
+            self.setMaterial(connect,mtl)
+        if mode=='ceiling':
+            mtl=self.doc.SearchMaterial('白色乳胶漆')
+            self.setMaterial(connect,mtl)
+            connect[c4d.ID_BASEOBJECT_REL_POSITION,c4d.VECTOR_Y]=self.STORYHEIGHT-thick
+        return connect,splist
+
+
+    #赋予材质
+    def setMaterial(self,obj,mtl,pro=3,tile=1,seaml=1,log=''):
+        mat=c4d.BaseTag(5616)
+        mat[c4d.TEXTURETAG_RESTRICTION]=log
+        mat[c4d.TEXTURETAG_MATERIAL]=mtl
+        mat[c4d.TEXTURETAG_PROJECTION]=pro
+        mat[c4d.TEXTURETAG_TILE]=tile
+        mat[c4d.TEXTURETAG_SEAMLESS]=seaml
+        obj.InsertTag(mat)
+        return True
+
+
+    #装配各种门
+    def setDoors(self,hardData):
+        harddata=hardData.GetChildren()
+        for obj in harddata:
+            for layername,splines in self.layersdic.items():
+                if obj[c4d.ID_BASELIST_NAME]==layername and 'door' in layername:
+                    for spline in splines:
+                        #获得图形坐标轮廓尺寸
+                        pos=spline.GetAbsPos()
+                        lenth_vec,angle_vec=self.getSplineAngle(spline)
+                        newobj=obj.GetClone()
+                        newobj=self.stretchModel(newobj,lenth_vec,self.DOORHEIGHT,self.DEFAULT_DOORSIZE)
+                        newobj.SetAbsPos(c4d.Vector(pos.x,0,pos.y))
+                        newobj.SetAbsRot(angle_vec)
+                        self.doc.InsertObject(newobj)
+                        c4d.EventAdd()
+        return True
+
+    #装配窗户
+    def setWindows(self,hardData):
+        harddata=hardData.GetChildren()
+        for obj in harddata:
+            for layername,splines in self.layersdic.items():
+                if obj[c4d.ID_BASELIST_NAME]==layername and 'window' in layername:
+                    for spline in splines:
+                        lenth_vec,angle_vec=self.getSplineAngle(spline)
+                        pos=spline.GetAbsPos()
+                        if lenth_vec>300:
+                            n=int(lenth_vec/self.DEFAULT_WINDOWSIZE['window'][0])
+                            w=lenth_vec/n
+                            connect=c4d.BaseObject(1011010)
+                            connect[c4d.CONNECTOBJECT_WELD]=0
+                            connect[c4d.CONNECTOBJECT_PHONG_MODE]=3
+                            connect[c4d.ID_BASELIST_NAME]=self.WINDOWMERGE
+                            doc.InsertObject(connect)
+                            newobj=self.confitWindows(obj,n,w,connect)
+                            #print(newobj)
+                        else:
+                            newobj=obj.GetClone()
+                            newobj=self.stretchModel(newobj,lenth_vec,self.DOORHEIGHT,self.DEFAULT_WINDOWSIZE)
+                            self.doc.InsertObject(newobj)
+                        newobj.SetAbsPos(c4d.Vector(pos.x,self.WINDOWDOWN,pos.y))
+                        newobj.SetAbsRot(angle_vec)
+                        #self.GeRayCollider(cpolygon,newobj)
+                    c4d.EventAdd()
+        return True
+
+
+    #装配隔墙体
+    def setOtherWalls(self,hardData):
+        harddata=hardData.GetChildren()
+        for obj in harddata:
+            for layername,splines in self.layersdic.items():
+                if obj[c4d.ID_BASELIST_NAME]==layername and 'wall' in layername and layername!='wall':
+                    for spline in splines:
+                        size=spline.GetRad()
+                        pos=spline.GetAbsPos()
+                        lenth_vec,angle_vec=self.getSplineAngle(spline)#获取角度
+                        newobj=obj.GetClone()
+                        #newobj=self.stretchModel(newobj,size.x*2,self.DOORHEIGHT,self.DEFAULT_WALLSIZE)
+                        newobj=self.stretchModel(newobj,lenth_vec,self.DOORHEIGHT,self.DEFAULT_WALLSIZE)
+                        newobj.SetAbsPos(c4d.Vector(pos.x,0,pos.y))
+                        newobj.SetAbsRot(angle_vec)
+                        self.doc.InsertObject(newobj)
+                        c4d.EventAdd()
+                        #self.GeRayCollider(cpolygon,newobj)
+        return True
+
+
+    #装配单个可拉伸家具
+    def deformatFurniture(self,furname,hardData):
+        harddata=hardData.GetChildren()
+        for obj in harddata:
+            if obj[c4d.ID_BASELIST_NAME]==furname:
+                for spline in self.layersdic[furname]:
+                    lenth_vec,angle_vec=self.getSplineAngle(spline)
+                    #size=spline.GetRad()
+                    pos=spline.GetAbsPos()
+                    newobj=obj.GetClone()
+                    newobj=self.stretchModel(newobj,lenth_vec,self.DEFAULT_FURNITURE[furname][1],self.DEFAULT_FURNITURE)
+                    newobj.SetAbsPos(c4d.Vector(pos.x,0,pos.y))
+                    angle_vec.x=-angle_vec.x
+                    newobj.SetAbsRot(angle_vec)
+                    self.doc.InsertObject(newobj)
+                    c4d.EventAdd()
+        return True
+
+    #装配场景中的可拉伸家具
+    def setDeformFurn(self,hardData):
+        names=list(self.DEFAULT_FURNITURE.keys())
+        for name in names:
+            self.deformatFurniture(name,hardData)
+        return True
+
+
+    #拉伸模型函数
+    def stretchModel(self,obj,width,height,defsizedic):
+        tags=obj.GetTags()
+        pointspos=obj.GetAllPoints()
+        cont=obj.GetPointCount()
+        dic={}
+        for tag in tags:
+            if tag[c4d.ID_BASELIST_NAME] in ['up','right','left']:
+                selection=tag.GetBaseSelect()
+                cnt=selection.GetCount()
+                dic[tag[c4d.ID_BASELIST_NAME]]=selection.GetAll(cont)
+        for index,pointpos in enumerate(pointspos):
+            if dic['up'][index]:
+                pointpos += c4d.Vector(0,height-defsizedic[obj[c4d.ID_BASELIST_NAME]][1],0)
+            if dic['right'][index]:
+                pointpos += c4d.Vector(width/2-defsizedic[obj[c4d.ID_BASELIST_NAME]][0]/2,0,0)
+            if dic['left'][index]:
+                pointpos += c4d.Vector(-width/2+defsizedic[obj[c4d.ID_BASELIST_NAME]][0]/2,0,0)
+            obj.SetPoint(index,pointpos)
+        return obj
+
+
+    #修正过大的窗户window是窗户对象，n是个数，w是宽度
+    def confitWindows(self,window,n,w,connect):
+        if n%2==0:
+            for i in range(n):
+                newwindow=window.GetClone()
+                newwindow=self.stretchModel(newwindow,w,self.WINDOWUP,self.DEFAULT_WINDOWSIZE)
+                if i%2==0:
+                    v=c4d.Vector(-w*(i+1)/2,0,0)
+                else:
+                    v=c4d.Vector(i*w/2,0,0)
+                newwindow.SetAbsPos(v)
+                doc.InsertObject(newwindow,parent=connect)
+        else:
+            for i in range(n):
+                newwindow=window.GetClone()
+                newwindow=self.stretchModel(newwindow,w,self.WINDOWUP,self.DEFAULT_WINDOWSIZE)
+                if i!=0:
+                    if i%2==0:
+                        v=c4d.Vector(i*w/2,0,0)
+                    else:
+                        v=c4d.Vector(-w*(i+1)/2,0,0)
+                    newwindow.SetAbsPos(v)
+                doc.InsertObject(newwindow,parent=connect)
+        c4d.EventAdd()
+        return connect
+
+    #打断spline点,lst是打断点列表
+    def disconnectSpline(self,lst):
+        settings = c4d.BaseContainer()
+        res = utils.SendModelingCommand(command=c4d.MCOMMAND_DISCONNECT,
+                                        list=lst,
+                                        mode=c4d.MODELINGCOMMANDMODE_POINTSELECTION,
+                                        bc=settings,
+                                        doc=doc,
+                                        flags=c4d.MODELINGCOMMANDFLAGS_CREATEUNDO)
+        c4d.EventAdd()
+
+    #获得物体的特定选择标签实例
+    def getSelectTag(self,obj,tagname):
+        tags=obj.GetTags()
+        for tag in tags:
+            if tag[c4d.ID_BASELIST_NAME]==tagname:
+                ins=tag.GetBaseSelect()
+                return ins
+
+
+    #碰撞检测函数（用与修复扣洞的bug）
+    def GeRayCollider(self,cpolygon,obj,rd,name=''):
+        #生成碰撞检测器
+        ge=c4d.utils.GeRayCollider()
+        ge.Init(cpolygon)
+        rpos=obj.GetRelPos()
+        angle=obj.GetRelRot().x
+        rdir=c4d.Vector(math.cos(angle+math.pi/2),0,math.sin(angle+math.pi/2))
+        ge.Intersect(rpos,rdir,rd,only_test = False )
+        num=ge.GetNearestIntersection()
+        print(num)
+        #添加选集标签
+
+        selectTag=c4d.SelectionTag(c4d.Tpolygonselection)
+        selectTag[c4d.ID_BASELIST_NAME]=name
+        cpolygon.InsertTag(selectTag)
+        return True
+
+
+
+#灯类
+class Lights():
+    SKYCOLOR=c4d.Vector(0.832, 0.878, 0.936)
+    SUNCOLOR=c4d.Vector(0.874, 0.811, 0.778)
+    SUNOFFSET=-0.4
+    SUNSIZE=10.0
+    POSY=140
+    LIGHTHEIGHT=279
+    AREA=20000
+    SCALE=1
+    PATH=doc.GetDocumentPath()+'/tex/'+'988965.hdr'
+
+    def __init__(self,doc,layersdic):
+        self.doc=doc
+        self.layersdic=layersdic
+
+    #创建灯光对象
+    def CreateLight(self,pos,size):
+        obj=c4d.BaseObject(5102)
+        obj[c4d.LIGHT_TYPE]=8
+        obj[c4d.ID_BASEOBJECT_REL_POSITION]=c4d.Vector(pos.x,self.LIGHTHEIGHT,pos.y)
+        obj.SetRotationOrder(c4d.ROTATIONORDER_XYZGLOBAL)
+        obj[c4d.ID_BASEOBJECT_REL_ROTATION]=c4d.Vector(-1.571, 0, 0)
+        obj[c4d.LIGHT_AREADETAILS_SIZEX]=size.x*self.SCALE
+        obj[c4d.LIGHT_AREADETAILS_SIZEY]=size.y*self.SCALE
+
+        tarTag1=c4d.BaseTag(1029526)
+        tarTag1[c4d.LIGHTTAG_POWER]=0.3
+        tarTag1[c4d.OCT_LIGHTTAG_TYPE_SELECT]=1
+        tarTag1[c4d.LIGHTTAG_KEEP_INSTANCE_POWER]=1
+        tarTag1[c4d.LIGHTTAG_VISIBLE_ON_SPECULAR]=0
+        tarTag1[c4d.LIGHTTAG_VIS_CAM]=0
+        tarTag1[c4d.LIGHTTAG_VIS_SHADOW]=0
+        tarTag1[c4d.LIGHTTAG_VIS_GEN]=0
+
+        obj.InsertTag(tarTag1)
+        doc.InsertObject(obj)
+        c4d.EventAdd()
+        return obj
+
+
+    #获取室内灯光坐标和大小
+    def setLights(self):
+        rooms,area=self.getRooms()
+        lights=[]
+        for roomspline in rooms:
+            pos=roomspline.GetRelPos()
+            size=roomspline.GetRad()
+            light=self.CreateLight(pos,size)
+            lights.append(light)
+        return lights
+
+
+    #设置全景相机位置
+    def setCamera(self,pos):
+        campos=c4d.Vector(pos.x,self.POSY,pos.y)
+        camobj=c4d.BaseObject(5103)
+        #camsuTag=c4d.BaseObject(5678)
+        camTag=c4d.BaseTag(1029524)
+        camTag[1439]=1
+        camTag[c4d.OCTANECAMERA_ENABLE_IMAGER]=1
+        camTag[c4d.OCT_CAMIMAGER_EN_DENOISER]=1
+        camTag[c4d.OCTANECAMERA_EXPOSURE]=4.0
+
+        camTag[c4d.OCTANECAMERA_HCOMPRESSION]=1.0
+        camTag[c4d.OCT_CAMERA_IMAGER_ORDER]=1
+        camTag[c4d.OCTANECAMERA_RESPONSE]=5221
+        camTag[c4d.OCTANECAMERA_NAT_RESPONSE]=1
+        camTag[c4d.OCTANECAMERA_GAMMA]=4.0
+        camobj[c4d.CAMERAOBJECT_SHOW]=0
+        camobj.InsertTag(camTag)
+        #camobj.InsertTag(camsuTag)
+        camobj.SetRelPos(campos)
+        doc.InsertObject(camobj)
+        c4d.EventAdd()
+        return camobj
+
+    #获取房间路径
+    def getRooms(self):
+        newwalls=[]
+        newarea=[]
+        walls=self.layersdic['wall']
+        rooms_area=[wall.GetRad().x*wall.GetRad().y for wall in walls]
+        maxindex=rooms_area.index(max(rooms_area))
+        for index,area in enumerate(rooms_area):
+            if index != maxindex and area>=self.AREA:
+                newspline=walls[index].GetClone()
+                newarea.append(area)
+                newwalls.append(newspline)
+        return newwalls,newarea
+
+
+
+    #批量设置全景相机
+    def setMulCam(self):
+        cams=[]
+        walls,area=self.getRooms()
+        poslst=[room.GetRelPos() for room in walls]
+        for i,pos in enumerate(poslst):
+            cam=self.setCamera(pos)
+            cam[c4d.ID_BASELIST_NAME]='cam'+str(i)
+            cams.append(cam)
+        return cams
+
+
+    #设置场景太阳光
+    def setSun(self):
+        sunobj=c4d.BaseObject(5102)
+        sunobj.SetRelPos(c4d.Vector(0))
+        sunobj[c4d.LIGHT_COLOR]=c4d.Vector(1)
+        sunobj[c4d.LIGHT_BRIGHTNESS]=1.0
+        sunobj[c4d.LIGHT_SHADOWTYPE]=0
+        sunobj[c4d.LIGHT_SHADOWTYPE_VIRTUAL]=0
+        sunobj[c4d.LIGHT_TYPE]=3
+        sunobj[c4d.ID_BASEOBJECT_REL_ROTATION]=c4d.Vector(0,-0.827,0)
+
+        sunTag=c4d.BaseTag(1029754)
+        sunTag[c4d.DAYLIGHTTAG_TURBIDITY]=2.5
+        sunTag[c4d.DAYLIGHTTAG_NORTHOFFSET]=self.SUNOFFSET
+        sunTag[c4d.DAYLIGHTTAG_SUNSIZE]=self.SUNSIZE
+        sunTag[c4d.DAYLIGHTTAG_SKYCOLOR]=self.SKYCOLOR
+        sunTag[c4d.DAYLIGHTTAG_SUNCOLOR]=self.SUNCOLOR
+        sunTag[c4d.DAYLIGHTTAG_USESKY]=1
+        sunTag[c4d.DAYLIGHTTAG_IMPSAMPLING]=1
+
+        sunobj.InsertTag(sunTag)
+        doc.InsertObject(sunobj)
+        c4d.EventAdd()
+        return sunobj
+
+
+    #设置环境HDR
+    def setEnv(self):
+        envobj=c4d.BaseObject(5105)
+        envTag=c4d.BaseTag(1029643)
+        envShader=c4d.BaseList2D(1029508)
+        envShader[c4d.IMAGETEXTURE_FILE]=self.PATH
+        envTag.InsertShader(envShader)
+        envTag[c4d.ENVIRONMENTTAG_TEXTURE]=envShader
+        envTag[c4d.ENVTAG_SLOT]=1
+        envTag[c4d.ENVIRONMENTTAG_POWER]=4.0
+        envTag[c4d.ENVTAG_VIS_BACKPLATE]=1
+        envTag[c4d.ENVTAG_VIS_REFLECT]=1
+        envTag[c4d.ENVTAG_VIS_REFRACT]=1
+        envobj.InsertTag(envTag)
+        doc.InsertObject(envobj)
+        c4d.EventAdd()
+
+
+#添加批量渲染列表
+def setRander(doc,cams):
+    bd=doc.GetActiveBaseDraw()
+    docPath=doc.GetDocumentPath()
+    docName=doc.GetDocumentName()
+    rPath=docPath+'/'+docName
+    br=c4d.documents.GetBatchRender()
+    br.Open()
+    for index,cam in enumerate(cams):
+        bd.SetSceneCamera(cam,animate=True)
+        br.AddFile(rPath,index+1)
+    return True
+
+
+#主程序
+def main():
+
+    #选择dwg对象，执行初始化运行
+    if doc.SearchObject('infomage') is None and 'dwg' in op[c4d.ID_BASELIST_NAME]:
+        #实例autoplan和infoMage
+        a=autoplan(doc,op)
+        a.cleanTag()
+
+        b=InfoMage('infomage',doc)
+        data=b.createMeshData()
+        infomage=b.insertInfoMage()
+        linklst=b.CreateGUI(a.getlayers(),infomage,mode=None)
+        c4d.EventAdd()
+
+        #根据meshdata匹配家具摆放
+        meshdata=doc.SearchObject('meshData')
+        a.setAllConfig(meshdata)
+        #实例化buildings，构建墙体
+        bu=buildings(doc,a.getlayers())
+        harddata=bu.createHardData()
+        #生成门洞和窗洞
+        subtract_all=bu.subtractAll()
+
+
+        #获得墙面和地面轮廓线的选集
+        #wallspaces,wallsplines=bu.tagInfo(subtract_all)
+        floors=bu.createBoard(mode='floor')
+        ceilings=bu.createBoard(mode='ceiling')
+        harddata=doc.SearchObject('hardData')
+        bu.setDoors(harddata)
+        bu.setOtherWalls(harddata)
+        bu.setWindows(harddata)
+        bu.setDeformFurn(harddata)
+
+
+        #构建环境和太阳光,相机
+        lights=Lights(doc,a.getlayers())
+        lights.setEnv()
+        lights.setSun()
+        cams=lights.setMulCam()
+        lights.setLights()
+        #c4d.CallCommand(12168)#删除未使用材质
+
+        c4d.CallCommand(202539)#增量保存文件
+        #setRander(doc,cams)#设置批量渲染
+
+
+
+if __name__=='__main__':
+
+    main()
+    c4d.EventAdd()
