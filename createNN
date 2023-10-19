@@ -1,0 +1,60 @@
+from typing import Optional
+import c4d
+
+doc: c4d.documents.BaseDocument # The document evaluating this python generator
+op: c4d.BaseObject # The python generator
+hh: Optional["PyCapsule"] # A HierarchyHelp object, only defined when main is executed
+
+
+# ___________
+def list_config():
+    lst = op.GetChildren()
+    return [[i,i+1] for i in range(len(lst)-1)]
+
+# ___________
+def createNN(gen,null_obj,config):
+    for con in config:
+        null_obj = createLines(gen,null_obj,lay1=con[0],lay2=con[1])
+    return null_obj
+
+
+# __________
+def createLines(gen,null,lay1=0,lay2=1):
+    children = gen.GetChildren()
+    modata = c4d.modules.mograph.GeGetMoData(children[lay1])
+    matrx_lst = modata.GetArray(id=c4d.MODATA_MATRIX)
+    for i,value in enumerate(matrx_lst):
+        point_poslist = get_point_pos_list(gen,layer1=lay1,index=i,layer2=lay2)
+        for k in range(len(point_poslist)):
+            line = c4d.SplineObject(2,c4d.SPLINETYPE_LINEAR)
+            line.SetAllPoints(point_poslist[k])
+            line.InsertUnder(null)
+    return null
+
+
+# _______________Vector__
+def get_pos_list(gen,matrx_obj):
+    modata = c4d.modules.mograph.GeGetMoData(matrx_obj)
+    matrx_lst = modata.GetArray(id=c4d.MODATA_MATRIX)
+    gen_matrx = gen.GetMl()
+    matrx_obj_matrx = matrx_obj.GetMl()
+    return [(gen_matrx * matrx_obj_matrx * matrx_lst[index]).off for index in range(len(matrx_lst))]
+
+
+# _____________vector__
+def get_point_pos_list(gen,layer1=0,index=0,layer2=1):
+    children = gen.GetChildren()
+    info = get_pos_list(gen,children[layer2])
+    lst=[]
+    start_pos = get_pos_list(gen,children[layer1])[index]
+    for i in range(len(info)):
+        temp = [start_pos,info[i]]
+        lst.append(temp)
+    return lst
+
+
+def main() -> c4d.BaseObject:
+    null = c4d.BaseObject(c4d.Onull)
+    null.SetRelPos(op.GetAbsPos())
+    config = list_config()
+    return createNN(op,null,config)
